@@ -22,7 +22,9 @@ import { folderOf, memberNames, pathOfFolder, planFolder, type Wanted } from '@a
 
 /** Rows per page of the album query. */
 const ALBUM_PAGE = 500;
-/** Members whose stored file is looked up at once. */
+/** Albums compared at once. */
+const ALBUM_CONCURRENCY = 4;
+/** Members of one album whose stored file is looked up at once. */
 const STAT_CONCURRENCY = 16;
 /** A full pass that would empty more than this share of the files there stops instead. */
 const MASS_REMOVAL_SHARE = 0.5;
@@ -63,6 +65,13 @@ export class AlbumFolders {
   /** Which albums each file was last seen in, so a deleted file's albums can be checked. */
   private readonly albumsByFile = new Map<string, Set<string>>();
   private readonly filesByAlbum = new Map<string, Set<string>>();
+  /**
+   * What each file's stored bytes were found to be, by id. A file's tier is fixed and its bytes
+   * are rewritten in place, so the answer holds for as long as the file exists, and a pass after
+   * the first looks up only the files it has not seen. A file without bytes on disk is asked again,
+   * since that may be a lookup that failed.
+   */
+  private readonly stored = new Map<string, { source: string; ino: number } | { skip: 'external' }>();
 
   constructor(
     private readonly cmd: Command,
@@ -73,6 +82,11 @@ export class AlbumFolders {
   /** The albums the file `id` was in when they were last compared. */
   albumsOf(id: string): string[] {
     return [...this.albumsByFile.get(id) ?? []];
+  }
+
+  /** Forget what was found of a file's bytes: the file is gone. */
+  forgetFile(id: string): void {
+    this.stored.delete(id);
   }
 
   /** Compare the folders at and under `path` with the albums there. */
@@ -106,14 +120,14 @@ export class AlbumFolders {
 
   private async pass(path: string, albums: Set<string>): Promise<AlbumFoldersSync> {
     const report = emptyReport(this.root, this.dryRun);
-    for (const album of [...albums].sort()) {
+    await mapLimit([...albums].sort(), ALBUM_CONCURRENCY, async (album) => {
       try {
         await this.album(album, report);
         report.albums++;
       } catch (error) {
         await this.cmd.writeError(`album-folders: ${album}: ${error instanceof Error ? error.message : error}\n`);
       }
-    }
+    });
 
     // Deepest first, so a folder emptied here is seen empty by its parent.
     for (const folder of await foldersUnder(folderOf(this.root, ALBUMS_ROOT, path))) {
@@ -137,7 +151,7 @@ export class AlbumFolders {
     if (listing.truncated) report.truncated.push(album);
 
     const names = memberNames(listing.members);
-    const found = await mapLimit(listing.members, STAT_CONCURRENCY, async (member) => await this.storedFile(member.path));
+    const found = await mapLimit(listing.members, STAT_CONCURRENCY, async (member) => await this.storedFile(member.id, member.path));
     const wanted: Wanted[] = [];
     found.forEach((file, index) => {
       if ('skip' in file) report.skipped[file.skip]++;
@@ -155,8 +169,16 @@ export class AlbumFolders {
     await applyPlan(folder, plan);
   }
 
-  /** Where the bytes of the file at `path` are on disk, or why it has no file to link. */
-  private async storedFile(path: string): Promise<{ source: string; ino: number } | { skip: SkipReason }> {
+  /** Where the bytes of the file `id` at `path` are on disk, or why it has no file to link. */
+  private async storedFile(id: string, path: string): Promise<{ source: string; ino: number } | { skip: SkipReason }> {
+    const known = this.stored.get(id);
+    if (known) return known;
+    const found = await this.lookUpStored(path);
+    if (!('skip' in found) || found.skip === 'external') this.stored.set(id, found as { source: string; ino: number } | { skip: 'external' });
+    return found;
+  }
+
+  private async lookUpStored(path: string): Promise<{ source: string; ino: number } | { skip: SkipReason }> {
     let source: unknown;
     try {
       source = (await this.cmd.sys.vfs.stat(this.cmd.access, path)).path;

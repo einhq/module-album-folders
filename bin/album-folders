@@ -154,6 +154,7 @@ const watch = async (cmd: Command, root: string, interval: number): Promise<numb
         continue;
       }
       for (const path of pathsToCheck(event, ALBUMS_ROOT, (id) => folders.albumsOf(id))) pending.add(path);
+      if (event.nodeType === 'file' && event.type === 'deleted') folders.forgetFile(event.nodeId);
       await queue.write(encoder.encode('ack\n'));
       if (pending.size > 0) schedule(SETTLE_MS);
     }

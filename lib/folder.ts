@@ -25,14 +25,24 @@ const exists = async (path: string): Promise<boolean> => {
   }
 };
 
-/** Run `fn` with `dir` writable, then make it read-only again. */
-const withWritable = async <T>(dir: string, fn: () => Promise<T>): Promise<T> => {
-  await Deno.chmod(dir, WRITABLE_MODE);
-  try {
-    return await fn();
-  } finally {
-    await Deno.chmod(dir, FOLDER_MODE).catch(() => {});
-  }
+/** The write in progress; the next waits for it, so two never toggle one folder's mode. */
+let writing: Promise<unknown> = Promise.resolve();
+
+/**
+ * Run `fn` with `dir` writable, then make it read-only again. One at a time: albums compared side
+ * by side share parent folders, and only the reading is done in parallel.
+ */
+const withWritable = <T>(dir: string, fn: () => Promise<T>): Promise<T> => {
+  const run = writing.then(async () => {
+    await Deno.chmod(dir, WRITABLE_MODE);
+    try {
+      return await fn();
+    } finally {
+      await Deno.chmod(dir, FOLDER_MODE).catch(() => {});
+    }
+  });
+  writing = run.catch(() => {});
+  return run;
 };
 
 /**
@@ -75,6 +85,8 @@ export const ensureFolder = async (root: string, folder: string): Promise<void> 
   const parent = dirname(folder);
   await ensureFolder(root, parent);
   await withWritable(parent, async () => {
+    // Another album beside this one may have made it meanwhile.
+    if (await exists(folder)) return;
     await Deno.mkdir(folder);
     await Deno.chmod(folder, FOLDER_MODE);
   });
