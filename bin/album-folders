@@ -67,7 +67,8 @@ const status = async (cmd: Command, root: string): Promise<number> => {
  */
 const watch = async (cmd: Command, root: string, interval: number): Promise<number> => {
   await openRoot(root);
-  const folders = new AlbumFolders(cmd, root);
+  let running = true;
+  const folders = new AlbumFolders(cmd, root, false, () => !running);
 
   const queuePath = cmd.env.ALBUM_FOLDERS_QUEUE || `${QUEUES_PATH}/album-folders`;
   const queueDir = queuePath.slice(0, queuePath.lastIndexOf('/'));
@@ -77,7 +78,6 @@ const watch = async (cmd: Command, root: string, interval: number): Promise<numb
   await cmd.sys.vfs.update(cmd.access, queuePath, { attrs: { routingKeys: ALBUM_FOLDERS_ROUTING_KEYS } });
 
   const abort = new AbortController();
-  let running = true;
   const pending = new Set<string>();
   let fullDue = true;
   let settle: number | undefined;
@@ -114,7 +114,8 @@ const watch = async (cmd: Command, root: string, interval: number): Promise<numb
         fullDue = false;
         pending.clear();
         try {
-          await cmd.writeLn(`album-folders: full pass, ${summary(await folders.full())}`);
+          const report = await folders.full();
+          if (running) await cmd.writeLn(`album-folders: full pass, ${summary(report)}`);
         } catch (error) {
           await cmd.writeError(`album-folders: full pass: ${error instanceof Error ? error.message : error}\n`);
         }

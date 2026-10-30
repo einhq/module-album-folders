@@ -77,6 +77,8 @@ export class AlbumFolders {
     private readonly cmd: Command,
     readonly root: string,
     private readonly dryRun = false,
+    /** Whether to stop: a pass then ends after the albums in hand, and says nothing of the rest. */
+    private readonly stopped: () => boolean = () => false,
   ) {}
 
   /** The albums the file `id` was in when they were last compared. */
@@ -114,21 +116,25 @@ export class AlbumFolders {
       }
     }
     const report = await this.pass(ALBUMS_ROOT, albums);
-    if (!this.dryRun) await writeMarker(this.root, { ...report, at: new Date().toISOString() });
+    if (!this.dryRun && !this.stopped()) await writeMarker(this.root, { ...report, at: new Date().toISOString() });
     return report;
   }
 
   private async pass(path: string, albums: Set<string>): Promise<AlbumFoldersSync> {
     const report = emptyReport(this.root, this.dryRun);
     await mapLimit([...albums].sort(), ALBUM_CONCURRENCY, async (album) => {
+      if (this.stopped()) return;
       try {
         await this.album(album, report);
         report.albums++;
       } catch (error) {
+        if (this.stopped()) return;
         await this.cmd.writeError(`album-folders: ${album}: ${error instanceof Error ? error.message : error}\n`);
       }
     });
 
+    // A pass cut short has not seen every album, so it removes nothing.
+    if (this.stopped()) return report;
     // Deepest first, so a folder emptied here is seen empty by its parent.
     for (const folder of await foldersUnder(folderOf(this.root, ALBUMS_ROOT, path))) {
       const album = pathOfFolder(this.root, ALBUMS_ROOT, folder);
