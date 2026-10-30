@@ -1,0 +1,5 @@
+{
+  "description": "Keeps the album folders, the albums as folders of real files on disk, in step with the albums",
+  "restartPolicy": "on-failure",
+  "workClass": "background"
+}

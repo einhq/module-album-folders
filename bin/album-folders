@@ -1,0 +1,233 @@
+#!ts
+/**
+ * album-folders — the albums as folders of real files on disk, for browsing outside EiN.
+ *
+ * Each album under /archive/albums is a folder under the album folders location (by default
+ * `albums` beside the stored files), and each of its photos, videos and recordings a hard link
+ * there to the stored file: the same bytes, no copy. The folders follow the albums one way; EiN
+ * never reads them, and they are read-only.
+ *
+ * `sync` compares the folders with the albums once, `watch` (the service) follows every change as
+ * it happens and compares everything again on a timer, and `status` says what the last full pass
+ * found.
+ */
+
+import { QUEUES_PATH } from '@ein/paths';
+import { type CmdReturn, collectUnknownFlags, type Command, isAdmin, parseArgs, reportUnknownFlags, type ResourceHandleIf } from '@ein/client';
+import { resolve } from '@std/path';
+import { ALBUMS_ROOT } from '@archive/paths';
+import type { AlbumFoldersStatus, AlbumFoldersSync } from '@album-folders/api';
+import { ALBUM_FOLDERS_ROUTING_KEYS, type FolderEvent, pathsToCheck } from '@album-folders/events';
+import { isMarked, openRoot, readMarker } from '@album-folders/folder';
+import { isWithin, outermost } from '@album-folders/plan';
+import { AlbumFolders, albumFoldersRoot } from '@album-folders/sync';
+
+const decoder = new TextDecoder();
+const encoder = new TextEncoder();
+
+/** How long the changes wait for more before the folders are compared. */
+const SETTLE_MS = 2000;
+
+const summary = (report: AlbumFoldersSync): string => {
+  const skipped = report.skipped.external + report.skipped.unstored;
+  return `${report.albums} albums: ${report.linked} linked, ${report.removed} removed, ${report.kept} in place` +
+    (skipped ? `, ${skipped} skipped (${report.skipped.external} kept elsewhere, ${report.skipped.unstored} not on disk)` : '') +
+    (report.truncated.length ? `; only part of ${report.truncated.join(', ')}` : '') +
+    (report.dryRun ? ' (dry run)' : '');
+};
+
+const sync = async (cmd: Command, root: string, path: string | undefined, dryRun: boolean, force: boolean): Promise<number> => {
+  if (path && !isWithin(path, ALBUMS_ROOT)) throw new Error(`${path}: not under ${ALBUMS_ROOT}`);
+  if (!dryRun) await openRoot(root);
+  else if (!(await isMarked(root)) && (await Deno.stat(root).catch(() => undefined))) throw new Error(`${root}: not marked as the album folders`);
+  const folders = new AlbumFolders(cmd, root, dryRun);
+  const report = path && path !== ALBUMS_ROOT ? await folders.check(path) : await folders.full(force);
+  if (cmd.json) await cmd.writeJSON(report satisfies AlbumFoldersSync);
+  else await cmd.writeLn(summary(report));
+  return 0;
+};
+
+const status = async (cmd: Command, root: string): Promise<number> => {
+  const ready = await isMarked(root);
+  const last = ready ? await readMarker(root) : undefined;
+  const answer = { root, ready, ...(last ? { last } : {}) } satisfies AlbumFoldersStatus;
+  if (cmd.json) await cmd.writeJSON(answer);
+  else {
+    await cmd.writeLn(`${root}: ${ready ? 'ready' : 'not set up'}`);
+    if (last) await cmd.writeLn(`last full pass ${last.at}, ${summary(last)}`);
+  }
+  return 0;
+};
+
+/**
+ * Follow the albums: a durable queue bound to the events that change a folder, each naming the
+ * albums to compare again once the changes settle, and a full pass at start and every `interval`
+ * seconds. An event is acked once its albums are noted, not once they are compared: what a
+ * restart loses in between, the full pass at start finds.
+ */
+const watch = async (cmd: Command, root: string, interval: number): Promise<number> => {
+  await openRoot(root);
+  const folders = new AlbumFolders(cmd, root);
+
+  const queuePath = cmd.env.ALBUM_FOLDERS_QUEUE || `${QUEUES_PATH}/album-folders`;
+  const queueDir = queuePath.slice(0, queuePath.lastIndexOf('/'));
+  await cmd.sys.vfs.ensure(cmd.access, 'directory', queueDir.slice(0, queueDir.lastIndexOf('/')) || '/', queueDir.slice(queueDir.lastIndexOf('/') + 1));
+  await cmd.sys.vfs.ensure(cmd.access, 'queue', queueDir, queuePath.slice(queuePath.lastIndexOf('/') + 1), { attrs: { routingKeys: ALBUM_FOLDERS_ROUTING_KEYS } });
+  // Re-bound in case the keys changed since the queue was made.
+  await cmd.sys.vfs.update(cmd.access, queuePath, { attrs: { routingKeys: ALBUM_FOLDERS_ROUTING_KEYS } });
+
+  const abort = new AbortController();
+  let running = true;
+  const pending = new Set<string>();
+  let fullDue = true;
+  let settle: number | undefined;
+  // A wake while a pass runs is kept, so the pass after it starts at once.
+  let woken = false;
+  let waiter: (() => void) | undefined;
+  const wake = () => {
+    woken = true;
+    waiter?.();
+  };
+
+  const schedule = (delay: number) => {
+    if (settle !== undefined) clearTimeout(settle);
+    settle = setTimeout(() => {
+      settle = undefined;
+      wake();
+    }, delay);
+  };
+  const timer = setInterval(() => {
+    fullDue = true;
+    schedule(0);
+  }, interval * 1000);
+
+  const stop = () => {
+    running = false;
+    abort.abort();
+    wake();
+  };
+  cmd.onInterrupt(stop);
+
+  const work = async (): Promise<void> => {
+    while (running) {
+      if (fullDue) {
+        fullDue = false;
+        pending.clear();
+        try {
+          await cmd.writeLn(`album-folders: full pass, ${summary(await folders.full())}`);
+        } catch (error) {
+          await cmd.writeError(`album-folders: full pass: ${error instanceof Error ? error.message : error}\n`);
+        }
+      }
+      const paths = outermost(pending);
+      pending.clear();
+      for (const path of paths) {
+        try {
+          const report = await folders.check(path);
+          if (report.linked || report.removed) await cmd.writeLn(`album-folders: ${path}: ${summary(report)}`);
+        } catch (error) {
+          await cmd.writeError(`album-folders: ${path}: ${error instanceof Error ? error.message : error}\n`);
+        }
+      }
+      if (!running) break;
+      if (!woken) await new Promise<void>((resolve) => (waiter = resolve));
+      woken = false;
+      waiter = undefined;
+    }
+  };
+
+  const consume = async (queue: ResourceHandleIf): Promise<void> => {
+    while (running) {
+      let event: FolderEvent;
+      try {
+        const bytes = await queue.read(1, abort.signal);
+        if (bytes.length === 0) {
+          if (!running) break;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+        event = JSON.parse(decoder.decode(bytes)) as FolderEvent;
+      } catch (error) {
+        if (!running) break;
+        await cmd.writeError(`album-folders: failed to read the queue: ${error}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+      for (const path of pathsToCheck(event, ALBUMS_ROOT, (id) => folders.albumsOf(id))) pending.add(path);
+      await queue.write(encoder.encode('ack\n'));
+      if (pending.size > 0) schedule(SETTLE_MS);
+    }
+  };
+
+  const queue = await cmd.sys.vfs.open(cmd.access, queuePath, { mode: 'r+' });
+  await cmd.writeLn(`album-folders: following the albums into ${root}`);
+  let failed = false;
+  try {
+    // One half failing stops the other, so the service exits and is restarted.
+    const results = await Promise.allSettled([work().finally(stop), consume(queue).finally(stop)]);
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        failed = true;
+        await cmd.writeError(`album-folders: ${result.reason}\n`);
+      }
+    }
+  } finally {
+    running = false;
+    clearInterval(timer);
+    if (settle !== undefined) clearTimeout(settle);
+    cmd.onInterrupt(null);
+    await queue.close().catch(() => {});
+  }
+  return failed ? 1 : 0;
+};
+
+const albumFolders = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, { boolean: ['dry-run', 'force'], unknown: collectUnknownFlags(unknown) });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+  const [subcommand, arg] = flags._.map(String);
+
+  try {
+    const root = albumFoldersRoot(cmd);
+    switch (subcommand) {
+      case 'status':
+        return await status(cmd, root);
+      case 'sync':
+      case 'watch':
+        // A pass sees what its caller may read and removes the rest.
+        if (!isAdmin(cmd.access)) throw new Error(`${subcommand} requires administrator access`);
+        return subcommand === 'sync'
+          ? await sync(cmd, root, arg ? resolve(cmd.cwd, arg) : undefined, !!flags['dry-run'], !!flags.force)
+          : await watch(cmd, root, Math.max(60, Number(cmd.env.CFG_ALBUM_FOLDERS_INTERVAL) || 3600));
+      default:
+        await cmd.writeError('usage: album-folders status | sync [ALBUM] [--dry-run] [--force] | watch\n');
+        return 1;
+    }
+  } catch (error) {
+    await cmd.writeError(`album-folders: ${error instanceof Error ? error.message : error}\n`);
+    return 1;
+  }
+};
+
+albumFolders.spec = {
+  name: 'album-folders',
+  effect: 'read' as const,
+  description: 'Keep the albums as folders of real files on disk, for browsing outside EiN (status, sync, watch)',
+  args: [
+    { name: 'subcommand', type: 'string' as const, writes: ['sync', 'watch'], description: 'status | sync | watch' },
+    { name: 'album', type: 'path' as const, description: 'sync: one album, or a directory of albums, instead of all of them' },
+  ],
+  flags: [
+    { name: 'dry-run', dryRun: true, type: 'bool' as const, description: 'sync: count what would be linked and removed, changing nothing' },
+    { name: 'force', type: 'bool' as const, description: 'sync: go ahead even when more than half the files belong to no album' },
+  ],
+  examples: [
+    'album-folders status',
+    'album-folders sync',
+    'album-folders sync /archive/albums/Exempelalbum_2019 --dry-run',
+  ],
+  returns:
+    'for `status`, the folder and what the last full pass found (AlbumFoldersStatus); for `sync`, what was linked, removed, kept and skipped (AlbumFoldersSync); `watch` runs until stopped.',
+};
+
+export default albumFolders;
