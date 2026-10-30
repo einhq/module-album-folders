@@ -216,7 +216,7 @@ albumFolders.spec = {
   description: 'Keep the albums as folders of real files on disk, for browsing outside EiN (status, sync, watch)',
   args: [
     { name: 'subcommand', type: 'string' as const, writes: ['sync', 'watch'], description: 'status | sync | watch' },
-    { name: 'album', type: 'path' as const, description: 'sync: one album, or a directory of albums, instead of all of them' },
+    { name: 'album', type: 'path' as const, optional: true, description: 'sync: one album, or a directory of albums, instead of all of them' },
   ],
   flags: [
     { name: 'dry-run', dryRun: true, type: 'bool' as const, description: 'sync: count what would be linked and removed, changing nothing' },
