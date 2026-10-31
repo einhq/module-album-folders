@@ -2,8 +2,8 @@
  * `album-folders sync` against a file store on disk: each album a read-only folder, each member a
  * hard link to its stored file, following members added, removed and deleted and albums moved;
  * media whose stored file is a link to an original elsewhere, or whose bytes are not on the disk
- * tier, left out; a folder that is not the
- * album folders, and a pass that would empty most of them, refused.
+ * tier, left out; a folder that is not the album folders, and a pass that would empty most of
+ * them, refused.
  */
 
 import { ALBUMS_ROOT } from '@archive/paths';
