@@ -1,7 +1,8 @@
 /**
  * `album-folders sync` against a file store on disk: each album a read-only folder, each member a
  * hard link to its stored file, following members added, removed and deleted and albums moved;
- * media whose stored file is a link to an original elsewhere left out; a folder that is not the
+ * media whose stored file is a link to an original elsewhere, or whose bytes are not on the disk
+ * tier, left out; a folder that is not the
  * album folders, and a pass that would empty most of them, refused.
  */
 
@@ -109,6 +110,16 @@ Deno.test({ name: 'album folders', sanitizeResources: false, sanitizeOps: false 
       const report = await sync();
       assertEquals(report.skipped.external, 1);
       assertEquals(await names(join(root, 'travel/rome')), ['c.jpg']);
+    });
+
+    await t.step('media whose bytes are not on the disk tier are left out', async () => {
+      await cmd.shouldSucceed(`mknode -t file ${ALBUMS_ROOT}/travel/rome/files/e.jpg --as mimetype=image/jpeg --tier db`);
+      assertEquals((await sync()).skipped.unstored, 1);
+      assertEquals(await names(join(root, 'travel/rome')), ['c.jpg']);
+      // A stored file outside the disk tier's root is on another mount, as the volatile tier is.
+      const elsewhere = await client.execJson<AlbumFoldersSync>(`EIN_FILE_ROOT_PATH=${fileRoot}-other CFG_ALBUM_FOLDERS_PATH=${root} album-folders sync --dry-run`);
+      assertEquals([elsewhere.linked, elsewhere.kept, elsewhere.skipped.unstored], [0, 0, 3]);
+      await cmd.shouldSucceed(`rm ${ALBUMS_ROOT}/travel/rome/files/e.jpg`);
     });
 
     await t.step('a pass that would empty most of the folders stops unless forced', async () => {

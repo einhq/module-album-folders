@@ -31,7 +31,7 @@ const SETTLE_MS = 2000;
 const summary = (report: AlbumFoldersSync): string => {
   const skipped = report.skipped.external + report.skipped.unstored;
   return `${report.albums} albums: ${report.linked} linked, ${report.removed} removed, ${report.kept} in place` +
-    (skipped ? `, ${skipped} skipped (${report.skipped.external} kept elsewhere, ${report.skipped.unstored} not on disk)` : '') +
+    (skipped ? `, ${skipped} skipped (${report.skipped.external} kept elsewhere, ${report.skipped.unstored} not on the disk tier)` : '') +
     (report.truncated.length ? `; only part of ${report.truncated.join(', ')}` : '') +
     (report.dryRun ? ' (dry run)' : '');
 };

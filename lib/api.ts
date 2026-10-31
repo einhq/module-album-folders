@@ -6,7 +6,7 @@
 export type SkipReason =
   /** Its stored file is a link to an original kept elsewhere (media imported from the old system). */
   | 'external'
-  /** It has no file on disk: its bytes are kept in the database. */
+  /** Its bytes are not on the disk tier, beside the originals: they are on the volatile tier, or in the database. */
   | 'unstored';
 
 /** What one pass over some albums did, or with `--dry-run` would do. */

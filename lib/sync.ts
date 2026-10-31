@@ -192,6 +192,9 @@ export class AlbumFolders {
       return { skip: 'unstored' };
     }
     if (typeof source !== 'string' || !source) return { skip: 'unstored' };
+    // Bytes on another tier are on another mount, which no hard link reaches.
+    const diskRoot = this.cmd.env.EIN_FILE_ROOT_PATH?.replace(/\/+$/, '');
+    if (diskRoot && !source.startsWith(`${diskRoot}/`)) return { skip: 'unstored' };
     try {
       const info = await Deno.lstat(source);
       if (info.isSymlink) return { skip: 'external' };
