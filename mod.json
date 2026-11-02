@@ -1,6 +1,6 @@
 {
   "name": "album-folders",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "The albums as folders of real files on disk, for browsing outside EiN",
   "coreApi": "^0.8.0",
   "exports": {
