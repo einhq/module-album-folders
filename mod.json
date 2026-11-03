@@ -1,6 +1,6 @@
 {
   "name": "album-folders",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "The albums as folders of real files on disk, for browsing outside EiN",
   "license": "Elastic-2.0, with an added permission (LICENSE)",
   "coreApi": "^0.9.0",
