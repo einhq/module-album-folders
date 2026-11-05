@@ -17,7 +17,6 @@
     "@archive/media/face-crop": "../archive/lib/media/face-crop.ts",
     "@archive/media/face-crop-rebuild": "../archive/lib/media/face-crop-rebuild.ts",
     "@archive/media/face-match": "../archive/lib/media/face-match.ts",
-    "@archive/media/orientation": "../archive/lib/media/orientation.ts",
     "@archive/media/regions": "../archive/lib/media/regions.ts",
     "@archive/paths": "../archive/lib/paths.ts",
     "@archive/people/api": "../archive/lib/people/api.ts",
