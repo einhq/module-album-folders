@@ -2,7 +2,7 @@
   "name": "album-folders",
   "version": "0.11.0",
   "description": "The albums as folders of real files on disk, for browsing outside EiN",
-  "license": "Elastic-2.0, with an added permission (LICENSE)",
+  "license": "MIT",
   "coreApi": "^0.12.0",
   "exports": {
     "./api": "./lib/api.ts"
