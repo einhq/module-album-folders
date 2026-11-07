@@ -80,7 +80,7 @@ const watch = async (cmd: Command, root: string, interval: number): Promise<numb
   const abort = new AbortController();
   const pending = new Set<string>();
   let fullDue = true;
-  let settle: number | undefined;
+  let settle: ReturnType<typeof setTimeout> | undefined;
   // A wake while a pass runs is kept, so the pass after it starts at once.
   let woken = false;
   let waiter: (() => void) | undefined;
